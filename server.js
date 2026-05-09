@@ -118,6 +118,13 @@ function saveKey(siteId, apiKey, siteUrl, siteName) {
     existing.site_name = siteName;
     existing.registered_at = new Date().toISOString();
     fs.writeFileSync(configPath, JSON.stringify(existing, null, 2));
+    // v1.3.3: harden file permissions so the API key is not
+    // world-readable on POSIX systems. Windows ignores chmod.
+    // Non-fatal — log + continue if it fails (older Node, weird FS).
+    if (process.platform !== "win32") {
+      try { fs.chmodSync(configPath, 0o600); }
+      catch { /* best effort; do not block onboarding */ }
+    }
     return true;
   } catch {
     // Fallback: try .env
@@ -216,7 +223,7 @@ function checkRateLimit() {
 // User-Agent identifies MCP traffic in Render server access logs so we
 // can measure "downloads → real API calls → registers" funnel without
 // adding a separate telemetry endpoint.
-const MCP_UA = "agentminds-mcp/1.3.2";
+const MCP_UA = "agentminds-mcp/1.3.3";
 
 function httpGet(path) {
   return new Promise((resolve, reject) => {
@@ -326,7 +333,7 @@ function formatActions(data) {
 // ══════════════════════════════════════════════════════════════
 
 const server = new Server(
-  { name: "agentminds", version: "1.3.2" },
+  { name: "agentminds", version: "1.3.3" },
   { capabilities: { tools: {} } }
 );
 
@@ -398,19 +405,51 @@ CRITICAL ANTI-HALLUCINATION RULES (preserved from v1.2.x):
     },
     {
       name: "agentminds_push",
-      description: `Push detailed agent data to AgentMinds Central. IMPORTANT: Send FULL data, not just names and scores.
+      description: `Push your agent reports to the AgentMinds network.
 
-Each agent report MUST include:
-- severity: "critical" | "warning" | "info"
-- summary: what the agent found (1-2 sentences)
-- metrics: key numbers (e.g. {total_leads: 567, bounce_rate: 3.5, open_rate: 12})
-- warnings: array of issues found [{severity: "warning", message: "..."}]
-- recommendations: array of suggested fixes [{title: "...", priority: "high"}]
-- memory.learned_patterns: what the agent learned [{pattern: "...", category: "...", confidence: 0.9, status: "active", impact: "high"}]
+Once you push, your account unlocks "personalised" mode — agentminds_connect
+will return stack-matched recommendations + cross-site references + negative
+evidence, instead of the generic 10-pattern rotational pool.
 
-The MORE detail you send, the BETTER recommendations you get back. Empty data = empty recommendations.
+Required minimum: at least one report with agent + severity + summary.
+The more signal you include (metrics, warnings, learned_patterns), the higher
+your data_quality grade and the better personalised matching gets.
 
-Example: {agent: "lead_hunter", report: {severity: "warning", summary: "567 leads found but 0% open rate", metrics: {total_leads: 567, emails_found: 230, open_rate: 0, bounce_rate: 8.3}, warnings: [{severity: "critical", message: "0% email open rate - emails likely going to spam"}], recommendations: [{title: "Warm up email domain before bulk sending", priority: "critical"}]}, memory: {learned_patterns: [{pattern: "cold_email_spam", category: "email_deliverability", confidence: 0.9, status: "active", impact: "critical", detail: "Bulk cold emails without domain warmup go to spam"}]}}`,
+Envelope (one item in reports[]):
+
+{
+  "agent":     "auth_service",                       // string, your agent's name
+  "report": {
+    "severity": "warning",                           // "info" | "warning" | "error" | "critical"
+    "summary":  "JWT validation failing intermittently under load",
+    "metrics":  { "requests": 12450, "errors": 23, "avg_latency_ms": 145 },
+    "warnings": [
+      { "severity": "warning", "message": "JWT signature mismatch on 0.2% of requests" }
+    ],
+    "recommendations": [
+      { "title": "Add retry logic", "priority": "high" }
+    ]
+  },
+  "memory": {
+    "learned_patterns": [
+      {
+        "pattern":    "JWT clock skew tolerance must be >30s",
+        "category":   "auth",
+        "confidence": 0.9,
+        "status":     "active",
+        "impact":     "high"
+      }
+    ]
+  }
+}
+
+Server returns a data_quality block per push: grade (A-F),
+average_score, accepted_reports/total_reports, and any flagged
+issues. Grade < D suppresses the report from cross-site delivery.
+
+Anti-hallucination contract: if the server rejects the payload, the
+tool surfaces the actual response (HTTP status + raw JSON). It will
+NEVER claim success without backend confirmation.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -623,7 +662,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "agentminds_connect": {
-        // Tier-aware pull-first model (mcp v1.3.2, backend a8c23b3):
+        // Tier-aware pull-first model (mcp v1.3.3, backend a8c23b3):
         //   PATH A — no API key      → /api/v1/sync/trial-rules (anon, 3/day)
         //   PATH B — key, no push    → /api/v1/sync/personalized-rules (10/day rotational)
         //   PATH C — key + push      → /api/v1/sync/personalized-rules (full personalised v1.3)
@@ -751,8 +790,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           lines.push("---");
           if (data.next_step?.message) lines.push(data.next_step.message + "\n");
-          lines.push("→ Push your agent reports with `agentminds_push` for unlimited stack-matched personalised access.");
-          if (data._meta?.upgrade_url) lines.push(`→ Pricing: ${data._meta.upgrade_url}`);
+
+          // v1.3.3 — "Why push?" comparison so a user reading this
+          // response sees the concrete tier-up value, not just a CTA.
+          // Mirrors the docs/3-tier ladder shipped on agentminds.dev.
+          lines.push("");
+          lines.push("## 📊 Why push?");
+          lines.push("");
+          lines.push("| Mode | Daily limit | Recommendation type |");
+          lines.push("|---|---|---|");
+          lines.push("| **You're here:** Registered | 10 rotational | Daily picks from top 50 of the public pool |");
+          lines.push("| **After push:** Personalised | Unlimited | Stack-matched (FastAPI / Flask / Django / Next.js / etc.) + cross-site references + negative evidence |");
+          lines.push("");
+          lines.push("Push your first agent report (1 minute):");
+          lines.push("- Run `agentminds_push` with `reports: [{...}]`");
+          lines.push("- See the tool description for the envelope schema");
+          lines.push("- Or visit https://agentminds.dev/docs for full guide");
+          if (data._meta?.upgrade_url) {
+            lines.push(`- Pricing: ${data._meta.upgrade_url}`);
+          }
 
           return { content: [{ type: "text", text: lines.join("\n") }] };
         }
@@ -1106,21 +1162,69 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           API_KEY = data.api_key;
           const saved = saveKey(data.site_id, data.api_key, regUrl, regName);
 
+          // v1.3.3 — comprehensive save-key guidance + recovery flow.
+          // Earlier versions just said "API key auto-saved to
+          // .agentminds.json". UAT (2026-05-09) showed users had no
+          // backup path if the file got cleaned/lost.
+          const lines = [];
+          lines.push("# ✅ Registration successful");
+          lines.push("");
+          lines.push(`Site:          \`${data.site_id}\``);
+          if (data.site_type)     lines.push(`Site type:     ${data.site_type}`);
+          if (data.enabled_agents && data.enabled_agents.length) {
+            lines.push(`Enabled agents: ${data.enabled_agents.join(", ")}`);
+          }
+          lines.push("");
+          lines.push("## 🔑 API Key");
+          lines.push("");
+          lines.push("```");
+          lines.push(data.api_key);
+          lines.push("```");
+          lines.push("");
+          lines.push("⚠️  Save this key — you cannot retrieve it again.");
+          lines.push("");
+          lines.push("## Storage options");
+          lines.push("");
+          if (saved) {
+            lines.push("**1. Project file** *(already done — auto-saved)*");
+            lines.push(`   \`.agentminds.json\` written in the current directory`);
+            lines.push("   with `chmod 600` on POSIX. Add to `.gitignore` if you");
+            lines.push("   commit this project.");
+          } else {
+            lines.push("**1. Project file** *(recommended — auto-save failed,");
+            lines.push("   you need to do this manually)*");
+            lines.push("   Create `.agentminds.json` in your project root:");
+            lines.push("   ```json");
+            lines.push("   {");
+            lines.push(`     "api_key": "${data.api_key}",`);
+            lines.push(`     "site_id": "${data.site_id}"`);
+            lines.push("   }");
+            lines.push("   ```");
+            lines.push("   Add `.agentminds.json` to `.gitignore`.");
+          }
+          lines.push("");
+          lines.push("**2. Environment variable** *(for CI/CD or shared shells)*");
+          lines.push("   ```bash");
+          lines.push(`   export AGENTMINDS_API_KEY=${data.api_key}`);
+          lines.push("   ```");
+          lines.push("");
+          lines.push("**3. Password manager** *(1Password / Bitwarden / KeePass)*");
+          lines.push(`   Entry name: \`AgentMinds ${data.site_id}\``);
+          lines.push("");
+          lines.push("## 🚨 Lost your key?");
+          lines.push("");
+          lines.push(`Email \`hello@agentminds.dev\` with your site URL`);
+          lines.push("(`" + regUrl + "`). We can verify ownership and reset.");
+          lines.push("");
+          lines.push("## 📚 Next steps");
+          lines.push("");
+          lines.push("1. Run `agentminds_connect` to verify the key works");
+          lines.push("   (you'll see Registered Mode with 10 daily patterns).");
+          lines.push("2. Run `agentminds_push` with your first agent reports");
+          lines.push("   to unlock personalised recommendations.");
+          lines.push("3. See https://agentminds.dev/docs for the full guide.");
           return {
-            content: [{
-              type: "text",
-              text: [
-                "# ✅ Registration successful",
-                "",
-                `Site ID: ${data.site_id}`,
-                `Site Type: ${data.site_type}`,
-                `Enabled Agents: ${(data.enabled_agents || []).join(", ")}`,
-                "",
-                saved ? "API key auto-saved to .agentminds.json" : `API Key: ${data.api_key} — add to .env: AGENTMINDS_API_KEY=${data.api_key}`,
-                "",
-                "Next: call `agentminds_push` to send your agent reports, then `agentminds_connect` to pull personalised recommendations.",
-              ].join("\n"),
-            }],
+            content: [{ type: "text", text: lines.join("\n") }],
           };
         } else {
           const detail = data.detail || data.message || JSON.stringify(data).substring(0, 200);
@@ -1161,7 +1265,7 @@ async function printWelcomeBanner() {
     stats = await new Promise((resolve) => {
       const req = https.get(
         `${API_URL}/health`,
-        { headers: { "User-Agent": "agentminds-mcp/1.3.2" }, timeout: 4000 },
+        { headers: { "User-Agent": "agentminds-mcp/1.3.3" }, timeout: 4000 },
         (res) => {
           let buf = "";
           res.on("data", (c) => (buf += c));
@@ -1180,7 +1284,7 @@ async function printWelcomeBanner() {
   const lines = [
     "",
     "  ┌─────────────────────────────────────────────────────────────┐",
-    "  │  AgentMinds MCP Server v1.3.2                                │",
+    "  │  AgentMinds MCP Server v1.3.3                                │",
     "  │  Cross-site pattern pool for production AI agent failures   │",
     "  └─────────────────────────────────────────────────────────────┘",
     "",

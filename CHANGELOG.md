@@ -9,6 +9,58 @@ https://github.com/agentmindsdev/agentminds/blob/main/CHANGELOG.md
 
 ---
 
+## [1.3.3] — 2026-05-09
+
+UX polish release closing the four P1 friction points the
+2026-05-09 UAT raised on top of v1.3.2. Backwards compatible —
+no API contract changes, no behaviour changes for existing
+users, just better output and tighter file permissions.
+
+### Added
+
+- **`agentminds_register` — comprehensive save-key guidance.**
+  Successful registration response now lays out three storage
+  options (project file / env var / password manager), explicit
+  loss-recovery flow (`hello@agentminds.dev` with site URL), and
+  next-step instructions. Earlier versions just said "API key
+  auto-saved to .agentminds.json" — UAT showed users had no
+  backup path if that file got cleaned/lost on a fresh
+  workspace.
+- **`agentminds_push` — full envelope schema in the tool
+  description.** A LLM client (Claude Code, Cursor, …) reading
+  the tool description can now produce a valid push payload
+  without consulting external docs. Includes the four-value
+  severity enum (`info | warning | error | critical`), nested
+  `report.metrics`, `warnings`, `recommendations`, and
+  `memory.learned_patterns` shape with field-level commentary.
+- **`agentminds_connect` registered-no-push — "Why push?"
+  comparison.** The response now includes a 2-row table comparing
+  *Registered* (10 rotational, top-50 picks) vs *Personalised*
+  (unlimited, stack-matched + cross-site references). Motivates
+  the next-tier upgrade with concrete payoff instead of a bare
+  CTA. Schema link points at the `agentminds_push` tool
+  description for the envelope.
+
+### Security
+
+- **`.agentminds.json` permissions tightened to `0o600` on POSIX.**
+  `saveKey()` now runs `chmod 600` on the written config file so
+  the API key is owner-readable only. Windows ignores the call
+  (no POSIX `chmod`); the rest of the platform behaviour is
+  unchanged. Failure to chmod is non-fatal — onboarding
+  continues, the file is still written.
+
+### Compatibility
+
+- API contract: unchanged. Backend a8c23b3+ continues to be the
+  required minimum.
+- Existing users with `AGENTMINDS_API_KEY` env var: no observable
+  change.
+- Existing users with `.agentminds.json` from v1.3.2 or earlier:
+  no observable change. New permissions only apply on subsequent
+  writes (e.g. re-running `agentminds_register`).
+- Anti-hallucination contract preserved across all surfaces.
+
 ## [1.3.2] — 2026-05-09
 
 ### Fixed (CRITICAL)
