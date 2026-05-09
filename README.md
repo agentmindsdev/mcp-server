@@ -126,8 +126,8 @@ This is early. We're inside the first 100-founder window:
 
 | Metric | Value |
 |---|---|
-| Founder slots remaining | 89 / 100 |
-| Contributing sites | 11 |
+| Founder slots remaining | 94 / 100 |
+| Contributing sites (active) | 6 |
 | Production-observed patterns | 1,896 |
 | Documented patterns | 702 |
 | Total tier-1 patterns | 2,598 |
