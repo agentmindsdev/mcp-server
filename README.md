@@ -34,6 +34,55 @@ The backend auto-routes between modes based on your auth + push
 state. The same `agentminds_connect` call returns different content
 at each tier.
 
+## Why not just ask ChatGPT or Claude?
+
+Fair question. Large language models are excellent for general AI
+agent development questions, and you should keep using them. But
+they have three blind spots that AgentMinds fills:
+
+### 1. Real-time production data
+
+LLM training cutoffs are months behind. The vLLM threading bug
+that broke production agents in March? Claude can describe it
+*now* (after the cutoff caught up), but couldn&apos;t have warned
+you *then*. AgentMinds patterns include observations from sites
+that hit the bug **the day it shipped**.
+
+### 2. Cross-site private knowledge
+
+Patterns learned inside private codebases never reach public
+training data. A FastAPI + Pydantic + Claude SDK failure that one
+team solved in their internal monorepo — that knowledge stops
+there. AgentMinds&apos; opt-in network shares it safely
+(URLs anonymised, push is explicit, GDPR-compliant).
+
+### 3. Quantified pattern data
+
+Claude can suggest a fix. AgentMinds can tell you:
+
+- 14 sites tried this fix
+- 9 solved it
+- 5 it didn&apos;t (and why — `negative_evidence`)
+- Average resolution time: 12 minutes
+- Reversibility: `safe_config` (no rollback risk)
+
+That&apos;s production data, not training data.
+
+> *Numbers above are illustrative for the format. Live counts vary*
+> *by pattern fingerprint and current network state — see*
+> *[/sync/pool-stats](https://api.agentminds.dev/api/v1/sync/pool-stats).*
+
+### Use both
+
+We&apos;re complementary, not competitive:
+
+- **General agent development questions** → Claude / Gemini / ChatGPT
+- **"What worked for someone with my exact stack in production"** → AgentMinds
+
+The MCP server makes both available in your terminal. Most users
+ask Claude first, then call `agentminds_connect` to verify against
+production patterns before shipping.
+
 ## Install
 
 ### Claude Code
