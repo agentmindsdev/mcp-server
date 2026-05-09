@@ -177,9 +177,9 @@ This is early. We're inside the first 100-founder window:
 |---|---|
 | Founder slots remaining | 94 / 100 |
 | Contributing sites (active) | 6 |
-| Production-observed patterns | 3,232 |
+| Production-observed patterns | 3,233 |
 | Documented patterns | 702 |
-| Total tier-1 patterns | 3,982 |
+| Total tier-1 patterns | 3,983 |
 
 The cross-site "peer sites solving the same problem" feature
 activates as the network grows. Today most patterns come from the
