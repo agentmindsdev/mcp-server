@@ -216,7 +216,7 @@ function checkRateLimit() {
 // User-Agent identifies MCP traffic in Render server access logs so we
 // can measure "downloads → real API calls → registers" funnel without
 // adding a separate telemetry endpoint.
-const MCP_UA = "agentminds-mcp/1.3.1";
+const MCP_UA = "agentminds-mcp/1.3.2";
 
 function httpGet(path) {
   return new Promise((resolve, reject) => {
@@ -326,7 +326,7 @@ function formatActions(data) {
 // ══════════════════════════════════════════════════════════════
 
 const server = new Server(
-  { name: "agentminds", version: "1.3.1" },
+  { name: "agentminds", version: "1.3.2" },
   { capabilities: { tools: {} } }
 );
 
@@ -623,7 +623,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "agentminds_connect": {
-        // Tier-aware pull-first model (mcp v1.3.1, backend a8c23b3):
+        // Tier-aware pull-first model (mcp v1.3.2, backend a8c23b3):
         //   PATH A — no API key      → /api/v1/sync/trial-rules (anon, 3/day)
         //   PATH B — key, no push    → /api/v1/sync/personalized-rules (10/day rotational)
         //   PATH C — key + push      → /api/v1/sync/personalized-rules (full personalised v1.3)
@@ -865,14 +865,104 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         if (args?.reports && Array.isArray(args.reports)) {
-          // Push reports directly via bulk endpoint
+          // v1.3.2 (2026-05-09) push fix:
+          //
+          // Earlier versions sent `site_id: "auto"` literal string to
+          // /sync/bulk and read `data.status || "ok"` from the response.
+          // Backend's /sync/bulk requires payload.site_id to match the
+          // site bound to the API key (sanitize_site_id + _verify_site
+          // chain at api.py:1069-1076), so the literal "auto" string was
+          // rejected by _verify_site. The MCP layer then displayed
+          // "Status: ok" via the fallback regardless — anti-hallucination
+          // violation, push silently failed.
+          //
+          // v1.3.2 resolves the real site_id from /sync/me first, sends
+          // it in the bulk payload, and surfaces the actual backend
+          // response (data_quality grade + stored count + issues) in the
+          // tool output. No more silent success.
+
+          // Step 1 — resolve real site_id from API key.
+          let me;
+          try {
+            me = await httpGet("/api/v1/sync/me");
+          } catch (err) {
+            return {
+              content: [{ type: "text", text: `# Push failed — API unreachable\n\n${err.message}\nTry again in a moment.` }],
+            };
+          }
+          if (me?.detail || !me?.site_id) {
+            const detailMsg = (me && me.detail) ? me.detail : "API returned no site_id";
+            return {
+              content: [{ type: "text", text: [
+                "# Push failed — could not resolve site_id from API key",
+                "",
+                `Backend response: ${detailMsg}`,
+                "",
+                "→ Check your `AGENTMINDS_API_KEY` is valid.",
+                "→ Or run `agentminds_register` to create a new account.",
+              ].join("\n") }],
+            };
+          }
+          const siteId = me.site_id;
+
+          // Step 2 — push with the real site_id, not "auto".
           const data = await httpPost("/api/v1/sync/bulk", {
-            site_id: "auto", // server determines from key
+            site_id: siteId,
             reports: args.reports,
           });
-          return {
-            content: [{ type: "text", text: `# Data Pushed\n\nReports sent: ${args.reports.length}\nStatus: ${data.status || "ok"}\n\nUse agentminds_connect to get your recommendations.` }],
-          };
+
+          // Step 3 — anti-hallucination: surface real backend response,
+          // never display hardcoded "ok". If the backend returned a
+          // FastAPI error envelope ({detail: "..."}) or a non-ok status,
+          // show it as a failure.
+          if (!data || data.detail || data.status !== "ok") {
+            const detail = (data && (data.detail || data.error)) || "no status field";
+            return {
+              content: [{ type: "text", text: [
+                "# Push not accepted by backend",
+                "",
+                `Site: \`${siteId}\``,
+                `Reports sent: ${args.reports.length}`,
+                `Backend response: ${detail}`,
+                "",
+                "Raw response:",
+                "```json",
+                JSON.stringify(data, null, 2).slice(0, 1200),
+                "```",
+              ].join("\n") }],
+            };
+          }
+
+          // Step 4 — successful push, format with real data_quality.
+          const dq = data.data_quality || {};
+          const lines = [];
+          lines.push("# ✅ Data pushed");
+          lines.push("");
+          lines.push(`Site:          \`${siteId}\``);
+          lines.push(`Reports sent:  ${args.reports.length}`);
+          if (data.stored !== undefined) lines.push(`Stored:        ${data.stored}`);
+          lines.push(`Backend status: ${data.status}`);
+          if (dq.grade) {
+            lines.push("");
+            lines.push("## Data quality (server-graded)");
+            lines.push(`- Grade:           ${dq.grade}`);
+            if (dq.average_score != null) lines.push(`- Average score:   ${dq.average_score}`);
+            if (dq.accepted_reports != null && dq.total_reports != null) {
+              lines.push(`- Accepted:        ${dq.accepted_reports} / ${dq.total_reports}`);
+            }
+            if (dq.low_quality_reports != null) lines.push(`- Low quality:     ${dq.low_quality_reports}`);
+            if (Array.isArray(dq.issues) && dq.issues.length > 0) {
+              lines.push("");
+              lines.push("### Quality issues flagged by backend");
+              for (const issue of dq.issues.slice(0, 8)) {
+                if (typeof issue === "string") lines.push(`- ${issue}`);
+                else lines.push(`- ${JSON.stringify(issue)}`);
+              }
+            }
+          }
+          lines.push("");
+          lines.push("→ Run `agentminds_connect` to pull personalised recommendations matched to your stack.");
+          return { content: [{ type: "text", text: lines.join("\n") }] };
         }
 
         return {
@@ -1071,7 +1161,7 @@ async function printWelcomeBanner() {
     stats = await new Promise((resolve) => {
       const req = https.get(
         `${API_URL}/health`,
-        { headers: { "User-Agent": "agentminds-mcp/1.3.1" }, timeout: 4000 },
+        { headers: { "User-Agent": "agentminds-mcp/1.3.2" }, timeout: 4000 },
         (res) => {
           let buf = "";
           res.on("data", (c) => (buf += c));
@@ -1090,7 +1180,7 @@ async function printWelcomeBanner() {
   const lines = [
     "",
     "  ┌─────────────────────────────────────────────────────────────┐",
-    "  │  AgentMinds MCP Server v1.3.1                                │",
+    "  │  AgentMinds MCP Server v1.3.2                                │",
     "  │  Cross-site pattern pool for production AI agent failures   │",
     "  └─────────────────────────────────────────────────────────────┘",
     "",

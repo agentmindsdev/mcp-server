@@ -9,6 +9,62 @@ https://github.com/agentmindsdev/agentminds/blob/main/CHANGELOG.md
 
 ---
 
+## [1.3.2] — 2026-05-09
+
+### Fixed (CRITICAL)
+
+- **Push silent failure.** `agentminds_push` was sending
+  `site_id: "auto"` as a literal string to backend `/sync/bulk`.
+  The backend's bulk handler runs `sanitize_site_id(payload.site_id)`
+  followed by `_verify_site(request, site_id)` — the verifier
+  cannot match a site named "auto" against any real key, so the
+  backend rejected the call. The MCP layer then printed
+  `Status: ${data.status || "ok"}` — and because `data.status`
+  was missing/non-ok, the fallback `"ok"` was rendered regardless.
+  Net effect: users called `agentminds_push`, saw "Status: ok",
+  but `has_pushed_data` never flipped, `agent_count` stayed at 0,
+  and `last_report_at` remained empty. The cross-site value loop
+  was broken at the final step — pushed data was never persisted.
+- **Anti-hallucination violation.** The `data.status || "ok"`
+  fallback hardcoded a success string regardless of backend
+  response. This violated the v1.3.0 anti-hallucination contract
+  (5 ALL-CAPS rules in the tool description that explicitly forbid
+  fabricating success). v1.3.2 restores it: the tool now surfaces
+  the actual backend response — HTTP error envelopes (`{detail:
+  "..."}`), missing/non-ok status fields, and validation messages
+  all render as a "Push not accepted" output instead of a fake
+  "Status: ok".
+
+### Changed
+
+- `agentminds_push` now resolves the real `site_id` from the API
+  key by calling `/api/v1/sync/me` before the bulk push. Both the
+  authentication state and the canonical site_id are confirmed in
+  one round-trip; the bulk POST then uses the real site_id
+  (matching the backend's `_verify_site` expectation).
+- Push tool output now includes the backend's `data_quality`
+  feedback: grade (A-F), average_score, accepted/total ratio,
+  low_quality_reports, and any flagged issues. Users see the
+  real grade their data earned, not a hardcoded message.
+- Failed pushes display the raw backend response (truncated to
+  1.2 kB) in a fenced JSON block for diagnostics. No silent
+  swallow.
+
+### Behaviour
+
+- **Existing v1.3.1-or-earlier users**: pushes that previously
+  appeared to succeed silently were not actually persisting.
+  Upgrading to 1.3.2 makes pushes work end-to-end for the first
+  time. The `agentminds_connect` mode for these users will
+  finally transition from `registered_no_push` to the personalised
+  flow once a real push lands.
+- **AGENTMINDS_API_KEY users**: zero behaviour change anywhere
+  *outside* the push tool. PATH C personalised flow runs the
+  identical code path as before.
+- **Backend**: zero changes required. The fix is entirely client-
+  side. Backend `/sync/bulk` already enforced the correct contract;
+  v1.3.2 just stops violating it.
+
 ## [1.3.1] — 2026-05-09
 
 ### Fixed (CRITICAL)
