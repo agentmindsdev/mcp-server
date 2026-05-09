@@ -216,7 +216,7 @@ function checkRateLimit() {
 // User-Agent identifies MCP traffic in Render server access logs so we
 // can measure "downloads → real API calls → registers" funnel without
 // adding a separate telemetry endpoint.
-const MCP_UA = "agentminds-mcp/1.3.0";
+const MCP_UA = "agentminds-mcp/1.3.1";
 
 function httpGet(path) {
   return new Promise((resolve, reject) => {
@@ -326,7 +326,7 @@ function formatActions(data) {
 // ══════════════════════════════════════════════════════════════
 
 const server = new Server(
-  { name: "agentminds", version: "1.3.0" },
+  { name: "agentminds", version: "1.3.1" },
   { capabilities: { tools: {} } }
 );
 
@@ -510,16 +510,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     "agentminds_intro", "agentminds_status", "agentminds_register",
   ]);
 
-  // Auto-register on first real tool call (push/connect/actions/etc).
-  // The function is a no-op if a key already exists; if no URL can be
-  // detected from the project context it returns silently and the
-  // normal tool flow handles the no-key case.
-  // Skip for discovery tools (intro/status) and for register itself
-  // (which would loop) — those work fine without a key.
+  // v1.3.1 (2026-05-09): implicit auto-registration on tool call
+  // is REMOVED. Earlier versions silently called autoRegisterIfNeeded()
+  // here, which created orphan site registrations using the cwd name
+  // as a placeholder and bypassed the v1.3.0 anonymous trial path
+  // (the very feature v1.3.0 was built to deliver).
+  //
+  // From v1.3.1 onward, no tool implicitly creates a site:
+  //   - agentminds_connect with no key → /trial-rules (anon)
+  //   - agentminds_push with no key    → "register first" message
+  //   - other authed tools with no key → "auth required" message
+  //   - agentminds_register            → only path that creates a site
+  //
+  // autoRegisterIfNeeded() is preserved (still callable from
+  // handleRegister + handleConnect's site_url-driven fallback if any),
+  // but is no longer invoked by the dispatcher.
   let autoRegResult = null;
-  if (!API_KEY && !FREE_TOOLS.has(name)) {
-    autoRegResult = await autoRegisterIfNeeded();
-  }
 
   if (!FREE_TOOLS.has(name)) {
     const limit = checkRateLimit();
@@ -617,7 +623,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "agentminds_connect": {
-        // Tier-aware pull-first model (mcp v1.3.0, backend a8c23b3):
+        // Tier-aware pull-first model (mcp v1.3.1, backend a8c23b3):
         //   PATH A — no API key      → /api/v1/sync/trial-rules (anon, 3/day)
         //   PATH B — key, no push    → /api/v1/sync/personalized-rules (10/day rotational)
         //   PATH C — key + push      → /api/v1/sync/personalized-rules (full personalised v1.3)
@@ -823,6 +829,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "agentminds_push": {
+        if (!API_KEY) {
+          return {
+            content: [{
+              type: "text",
+              text: [
+                "# Cannot push — no API key found",
+                "",
+                "To push site data into the AgentMinds network, you need a key first.",
+                "",
+                "**Two paths:**",
+                "",
+                "1. Register from the terminal (creates a site, returns a key):",
+                "   `agentminds_register` with `url` + `name`.",
+                "",
+                "2. Already have a key (e.g. from agentminds.dev/onboard)?",
+                "   Set `AGENTMINDS_API_KEY=sk_...` in your env or",
+                "   `.agentminds.json`, then call this tool again.",
+                "",
+                "**Or browse without registering:** run `agentminds_connect`",
+                "for the anonymous trial (3 popular network patterns, no signup).",
+              ].join("\n"),
+            }],
+          };
+        }
         if (args?.brain_export_url) {
           // Let Central pull from the URL
           const data = await httpPost("/api/v1/connect", {
@@ -851,6 +881,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "agentminds_actions": {
+        if (!API_KEY) {
+          return {
+            content: [{
+              type: "text",
+              text: [
+                "# Authentication required",
+                "",
+                "`agentminds_actions` returns the personalized action plan",
+                "for your site, which requires authentication.",
+                "",
+                "→ Run `agentminds_register` to create a site, or set",
+                "  `AGENTMINDS_API_KEY=sk_...` if you already have one.",
+                "→ For a no-signup preview of the network, use",
+                "  `agentminds_connect` (anonymous trial mode).",
+              ].join("\n"),
+            }],
+          };
+        }
         const siteId = args?.site_id || "";
         let data;
         if (siteId) {
@@ -865,6 +913,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "agentminds_agent_detail": {
+        if (!API_KEY) {
+          return {
+            content: [{
+              type: "text",
+              text: [
+                "# Authentication required",
+                "",
+                "`agentminds_agent_detail` returns per-agent data for an",
+                "authenticated site.",
+                "",
+                "→ Run `agentminds_register` first or set",
+                "  `AGENTMINDS_API_KEY=sk_...`.",
+              ].join("\n"),
+            }],
+          };
+        }
         const data = await httpGet(`/api/v1/sync/sites/${args.site_id}/agents/${args.agent_name}`);
         return {
           content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
@@ -872,6 +936,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "agentminds_site_overview": {
+        if (!API_KEY) {
+          return {
+            content: [{
+              type: "text",
+              text: [
+                "# Authentication required",
+                "",
+                "`agentminds_site_overview` returns the dashboard view of",
+                "an authenticated site.",
+                "",
+                "→ Run `agentminds_register` first or set",
+                "  `AGENTMINDS_API_KEY=sk_...`.",
+              ].join("\n"),
+            }],
+          };
+        }
         const data = await httpGet(`/api/v1/sync/sites/${args.site_id}`);
         const meta = data.meta || {};
         const agents = data.agents || {};
@@ -991,7 +1071,7 @@ async function printWelcomeBanner() {
     stats = await new Promise((resolve) => {
       const req = https.get(
         `${API_URL}/health`,
-        { headers: { "User-Agent": "agentminds-mcp/1.3.0" }, timeout: 4000 },
+        { headers: { "User-Agent": "agentminds-mcp/1.3.1" }, timeout: 4000 },
         (res) => {
           let buf = "";
           res.on("data", (c) => (buf += c));
@@ -1010,7 +1090,7 @@ async function printWelcomeBanner() {
   const lines = [
     "",
     "  ┌─────────────────────────────────────────────────────────────┐",
-    "  │  AgentMinds MCP Server v1.3.0                                │",
+    "  │  AgentMinds MCP Server v1.3.1                                │",
     "  │  Cross-site pattern pool for production AI agent failures   │",
     "  └─────────────────────────────────────────────────────────────┘",
     "",

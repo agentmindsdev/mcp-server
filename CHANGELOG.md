@@ -9,6 +9,62 @@ https://github.com/agentmindsdev/agentminds/blob/main/CHANGELOG.md
 
 ---
 
+## [1.3.1] — 2026-05-09
+
+### Fixed (CRITICAL)
+
+- **Removed implicit auto-registration on tool calls.** Earlier
+  versions silently invoked `autoRegisterIfNeeded()` from the
+  central tool dispatcher before the per-tool handler ran. Result:
+  the very first call to *any* authenticated tool (most commonly
+  `agentminds_connect`) would create a brand-new site registration
+  in the AgentMinds backend using the calling project's cwd
+  basename as a placeholder name, **without user consent**. This:
+  - Bypassed the v1.3.0 anonymous trial path entirely (the headline
+    feature of v1.3.0 — `agentminds_connect` against
+    `/api/v1/sync/trial-rules` — was unreachable).
+  - Polluted backend metrics with orphan registrations
+    (37 registered, only 1 substantial pusher per the 2026-05-09
+    UAT).
+  - Created `.agentminds.json` files in user cwd's without explicit
+    consent.
+
+### Behavior changes
+
+- `agentminds_connect` with no API key → calls `/trial-rules`
+  (anonymous mode) as documented in v1.3.0 release notes.
+- `agentminds_push` with no API key → returns a clear "register
+  first" message with two paths (`agentminds_register` or
+  manual env-var setup).
+- `agentminds_actions`, `agentminds_agent_detail`,
+  `agentminds_site_overview` with no API key → return an
+  "authentication required" message instead of attempting an
+  authenticated call against the backend.
+- `agentminds_register` is unchanged — it remains the only path
+  that creates a site registration, and it requires explicit
+  caller intent (the user invoked the register tool).
+- `agentminds_intro` and `agentminds_status` remain public,
+  unchanged.
+
+### Compatibility
+
+- **Existing users with `AGENTMINDS_API_KEY` set: no behaviour
+  change.** The PATH C personalised flow (push history present)
+  runs the identical code path as v1.3.0.
+- **Existing users with a `.agentminds.json` file in cwd: no
+  behaviour change.** `loadProjectKey()` continues to pick the key
+  up at startup.
+- Internal helper `autoRegisterIfNeeded()` is preserved (still
+  callable from the explicit `agentminds_register` tool flow);
+  only the dispatcher-level implicit invocation is removed.
+
+### Backend metrics cleanup
+
+A separate task tracks DB-side cleanup of historical orphan
+registrations created by pre-v1.3.1 versions. The
+`_count_active_sites()` filter on `/sync/pool-stats` already
+hides them from the public counter, but they remain in the DB.
+
 ## [1.3.0] — 2026-05-08
 
 ### Changed (tier-aware behaviour)
