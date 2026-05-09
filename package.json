@@ -1,6 +1,6 @@
 {
   "name": "agentminds-mcp",
-  "version": "1.1.0",
+  "version": "1.3.0",
   "description": "Model Context Protocol server for AgentMinds — gives Claude Code, Cursor, Zed, and other MCP-aware AI clients native access to the AgentMinds cross-site collective intelligence pool. Push agent reports, pull personalised recommendations, browse the network's solved patterns.",
   "main": "server.js",
   "type": "module",

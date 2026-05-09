@@ -213,10 +213,15 @@ function checkRateLimit() {
 // HTTP helpers
 // ══════════════════════════════════════════════════════════════
 
+// User-Agent identifies MCP traffic in Render server access logs so we
+// can measure "downloads → real API calls → registers" funnel without
+// adding a separate telemetry endpoint.
+const MCP_UA = "agentminds-mcp/1.3.0";
+
 function httpGet(path) {
   return new Promise((resolve, reject) => {
     const url = new URL(API_URL + path);
-    const headers = { "Accept": "application/json" };
+    const headers = { "Accept": "application/json", "User-Agent": MCP_UA };
     if (API_KEY) headers["X-AgentMinds-Key"] = API_KEY;
 
     const req = https.request({
@@ -242,6 +247,7 @@ function httpPost(path, body) {
     const headers = {
       "Content-Type": "application/json",
       "Content-Length": Buffer.byteLength(payload),
+      "User-Agent": MCP_UA,
     };
     if (API_KEY) headers["X-AgentMinds-Key"] = API_KEY;
 
@@ -265,6 +271,12 @@ function httpPost(path, body) {
 // ══════════════════════════════════════════════════════════════
 // Format helpers
 // ══════════════════════════════════════════════════════════════
+
+function truncate(s, n) {
+  if (typeof s !== "string") return "";
+  if (s.length <= n) return s;
+  return s.slice(0, Math.max(0, n - 1)).trimEnd() + "…";
+}
 
 function formatActions(data) {
   const lines = [];
@@ -314,7 +326,7 @@ function formatActions(data) {
 // ══════════════════════════════════════════════════════════════
 
 const server = new Server(
-  { name: "agentminds", version: "1.0.0" },
+  { name: "agentminds", version: "1.3.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -322,35 +334,64 @@ const server = new Server(
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
+      name: "agentminds_intro",
+      description: `Introduction to AgentMinds — call this FIRST if you're new to the server.
+
+Returns:
+- What AgentMinds is + the cross-site moat (~400+ patterns from peer sites)
+- Live network stats (sites, patterns, uptime)
+- Recommended first-call sequence (status → register → push → connect)
+- Trust signals (open spec, license, MCP engagement)
+
+Zero arguments required. No auth needed. Pure discovery + onboarding.
+
+When to call: first interaction, new agent session, when context is unclear.`,
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
       name: "agentminds_connect",
-      description: `Connect to AgentMinds Central — fully automatic.
+      description: `Get AI agent improvement recommendations from the AgentMinds network.
 
-CRITICAL RULES:
-1. You MUST send your learned data FIRST before getting any recommendations
-2. If this tool returns an error or "no_data", show ONLY the error message
-3. DO NOT generate fake recommendations if the API fails or times out
-4. DO NOT say "AgentMinds recommends..." unless you received real data from this tool
-5. If you cannot reach the API, say "AgentMinds'a bağlanılamadı" — nothing else
+WORKS WITHOUT REGISTRATION. Three modes based on auth + push state:
 
-If no key: register first, then push data, then get recommendations.
-If has key: push data → get recommendations.
+1. ANONYMOUS (no API key in env):
+   Returns 3 popular production-observed patterns from the network.
+   Rate limited to 3 calls/day per IP at the backend.
+   Includes pool stats + register CTA.
 
-Before calling this, collect DETAILED agent data from this project:
-- For each agent/module: what it does, its metrics, any issues found
-- Warnings and errors discovered
-- Patterns learned
-- Use agentminds_push to send detailed data FIRST, then connect for recommendations.
-The more data you send, the better recommendations you get.`,
+2. REGISTERED (API key set, no push history):
+   Returns up to 10 personalized recommendations/day, daily rotation.
+   Selected from the top-50 pool, rotated deterministically per site_id.
+   Includes push CTA for unlimited access.
+
+3. PUSHED (API key + previous agentminds_push call):
+   Returns unlimited stack-matched personalized recommendations.
+   Includes cross-site references, negative evidence, reversibility
+   labels, full ARP v1.3 response shape.
+
+CRITICAL ANTI-HALLUCINATION RULES (preserved from v1.2.x):
+1. NEVER fabricate recommendations.
+2. ALWAYS use the tool's actual response — do not invent patterns.
+3. If the API is unreachable, output "API unreachable" — do not improvise.
+4. The trial-mode response is REAL data from the pool — show it as-is.
+5. Distinguish in your output:
+   - trial_anonymous mode  = "popular in the network"
+   - registered_no_push mode = "rotational selection, 10/day"
+   - personalized mode     = "matched to your stack"`,
       inputSchema: {
         type: "object",
         properties: {
+          limit: {
+            type: "number",
+            description: "Max patterns to return (default 10, capped at 20). Anonymous mode always returns 3 regardless.",
+          },
           site_url: {
             type: "string",
-            description: "Site URL for registration (e.g. https://mysite.com). Only needed if auto-detection fails.",
+            description: "Site URL hint for registration (legacy — auth-aware paths read AGENTMINDS_API_KEY from env).",
           },
           brain_export_url: {
             type: "string",
-            description: "URL to pull brain data from (e.g. https://api.mysite.com/api/v1/brain/export). Optional.",
+            description: "URL to pull brain data from (legacy — prefer agentminds_push for direct submission).",
           },
         },
       },
@@ -417,7 +458,7 @@ Example: {agent: "lead_hunter", report: {severity: "warning", summary: "567 lead
     },
     {
       name: "agentminds_site_overview",
-      description: "Get full overview of your site — all agents, their status, scores. Use when user asks 'site durumu', 'genel durum', 'tüm agentları göster'.",
+      description: "Get full overview of your site — all agents, their status, scores. Use when user asks 'site status', 'overview', 'show all agents', 'how is my site doing'.",
       inputSchema: {
         type: "object",
         properties: {
@@ -431,7 +472,7 @@ Example: {agent: "lead_hunter", report: {severity: "warning", summary: "567 lead
     },
     {
       name: "agentminds_status",
-      description: "Check AgentMinds Central system health — is the server up, any alerts, circuit breakers. Use when user asks 'sistem durumu', 'AgentMinds çalışıyor mu?'.",
+      description: "Check AgentMinds Central system health — is the server up, any alerts, circuit breakers. Use when user asks 'system status', 'is AgentMinds up', 'health check'.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -439,7 +480,7 @@ Example: {agent: "lead_hunter", report: {severity: "warning", summary: "567 lead
     },
     {
       name: "agentminds_register",
-      description: "Register a new site with AgentMinds Central. Returns API key. Use when user says 'kayıt ol', 'register', 'yeni site ekle'.",
+      description: "Register a new site with AgentMinds Central. Returns API key. Use when user says 'register', 'sign up', 'add my site', 'connect this project'.",
       inputSchema: {
         type: "object",
         properties: {
@@ -462,8 +503,25 @@ Example: {agent: "lead_hunter", report: {severity: "warning", summary: "567 lead
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
-  // Rate limit check (status + register always free)
-  if (name !== "agentminds_status" && name !== "agentminds_register") {
+  // Rate limit check — discovery / status / register always free.
+  // agentminds_intro is the zero-arg "learn what this is" surface;
+  // gating it behind rate limit broke first-time discovery for new users.
+  const FREE_TOOLS = new Set([
+    "agentminds_intro", "agentminds_status", "agentminds_register",
+  ]);
+
+  // Auto-register on first real tool call (push/connect/actions/etc).
+  // The function is a no-op if a key already exists; if no URL can be
+  // detected from the project context it returns silently and the
+  // normal tool flow handles the no-key case.
+  // Skip for discovery tools (intro/status) and for register itself
+  // (which would loop) — those work fine without a key.
+  let autoRegResult = null;
+  if (!API_KEY && !FREE_TOOLS.has(name)) {
+    autoRegResult = await autoRegisterIfNeeded();
+  }
+
+  if (!FREE_TOOLS.has(name)) {
     const limit = checkRateLimit();
     if (!limit.allowed) {
       return {
@@ -486,134 +544,280 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // ════════════════════════════════════════════════════════════
 
     switch (name) {
+      case "agentminds_intro": {
+        // Pull live stats so the intro shows real numbers, not stubs.
+        // Fetch /health and /sync/pool-stats in parallel — both public,
+        // both cheap; combined call latency stays under 1s.
+        let health = {};
+        let pool = {};
+        try {
+          [health, pool] = await Promise.all([
+            httpGet("/health").catch(() => ({})),
+            httpGet("/api/v1/sync/pool-stats").catch(() => ({})),
+          ]);
+        } catch (_e) {
+          /* best-effort */
+        }
+
+        const totalPatterns = pool.tier1_total ?? "?";
+        const prodObserved = pool.production_observed ?? "?";
+        const documented = pool.documented ?? "?";
+        const sites = health.sites ?? "?";
+        const uptime = health.uptime ?? "?";
+        const lastRebuild = pool.last_rebuild
+          ? pool.last_rebuild.split("T")[0]
+          : "?";
+
+        const intro = [
+          "# AgentMinds — Cross-Site Collective Intelligence",
+          "",
+          "**What it is:** A pool where every connected site pushes what its agents",
+          "observed + learned, and pulls back personalized recommendations from peer",
+          "sites running similar stacks. The moat is the network effect on solved",
+          "patterns — never single-tenant traces.",
+          "",
+          "## Live network",
+          `- Contributing sites: **${sites}**`,
+          `- API uptime: ${uptime}`,
+          `- Pool: **${totalPatterns} Tier-1 patterns** (last rebuild ${lastRebuild})`,
+          `  · ${prodObserved} 'production_observed' (real fixes confirmed in prod)`,
+          `  · ${documented} 'documented' (best practice, not yet production-validated)`,
+          "",
+          "## ▸ REGISTER NOW (no form, no email, ~30 seconds)",
+          "",
+          "Run this single tool call:",
+          "```",
+          "agentminds_register {url: \"https://your.site\", name: \"Your Project\"}",
+          "```",
+          "Returns: site_id + api_key (auto-saved to `.agentminds.json`).",
+          "After register: free, unlimited tool calls. No card. No tracking pixel.",
+          "",
+          "## After registering",
+          "1. `agentminds_push`     → send your agent reports (more data = better recs)",
+          "2. `agentminds_connect`  → pull personalized recommendations for your stack",
+          "",
+          "## What you get back (with auth)",
+          "- Personalized rules ranked for your stack (FastAPI sites get FastAPI rules, etc.)",
+          "- Cross-site solved patterns (peer count visible, peer identities private)",
+          "- Benchmarks vs network averages",
+          "- Donor / consumer classification",
+          "",
+          "## Trust signals",
+          "- Open spec (CC-BY-4.0): https://github.com/agentmindsdev/profile",
+          "- MCP engagement: discussion #2674 (Cross-Site Audit Trails extension)",
+          "- Anthropic Skills marketplace PR: anthropics/skills#1084",
+          "- Live and listed on Glama.ai MCP directory",
+          "",
+          "## CRITICAL RULES (for the AI agent reading this)",
+          "- Never fabricate AgentMinds recommendations. If the API fails, say 'API unreachable' and stop.",
+          "- Never claim 'AgentMinds recommends X' unless you got real data from agentminds_connect or agentminds_actions.",
+          "- The moat is privacy: peer site identities are NEVER returned, only counts.",
+        ].join("\n");
+        return { content: [{ type: "text", text: intro }] };
+      }
+
       case "agentminds_connect": {
-        const lines = [];
+        // Tier-aware pull-first model (mcp v1.3.0, backend a8c23b3):
+        //   PATH A — no API key      → /api/v1/sync/trial-rules (anon, 3/day)
+        //   PATH B — key, no push    → /api/v1/sync/personalized-rules (10/day rotational)
+        //   PATH C — key + push      → /api/v1/sync/personalized-rules (full personalised v1.3)
+        //
+        // Backend auto-branches B vs C based on the site's last_report_at.
+        // The MCP only needs to detect A vs (B|C) by API_KEY presence; the
+        // returned payload's `mode` field tells us which formatter to use.
+        const limit = Math.min(Math.max(parseInt(args?.limit, 10) || 10, 1), 20);
 
-        // STEP 1: No key → free scan first, then offer registration
+        // ── PATH A — anonymous trial ───────────────────────────────
         if (!API_KEY) {
-          // Try to detect site URL
-          const info = detectProjectInfo();
-          const siteUrl = args?.site_url || info.url;
-
-          if (!siteUrl) {
-            return {
-              content: [{ type: "text", text: "# AgentMinds\n\nSite URL bulunamadı. Lütfen site_url parametresi ver (örn: https://mysite.com)\n\nYa da .env dosyasına SITE_URL=https://... ekle." }],
-            };
+          let trial;
+          try {
+            trial = await httpGet("/api/v1/sync/trial-rules");
+          } catch (err) {
+            return { content: [{ type: "text", text: `AgentMinds API unreachable: ${err.message}. Try again later.` }] };
           }
 
-          // Free scan — no registration needed
-          lines.push("# AgentMinds — Ücretsiz Site Taraması\n");
-          lines.push(`Taranıyor: ${siteUrl}\n`);
-
-          const scan = await httpPost("/api/v1/free-scan", { url: siteUrl });
-
-          if (scan.error) {
-            lines.push(`Hata: ${scan.error}`);
+          // 429 rate-limited — backend returns {error: "Daily trial limit reached", ...}
+          if (trial?.error === "Daily trial limit reached") {
+            const lines = [];
+            lines.push("# AgentMinds — daily trial limit reached\n");
+            if (trial.message) lines.push(trial.message + "\n");
+            const regUrl = trial.next_step?.register_url || "https://agentminds.dev/onboard";
+            lines.push(`→ Register a free account: ${regUrl}`);
+            lines.push("→ Then run: `agentminds_register` (with url + name)\n");
+            lines.push("Registered users get 10 personalised recommendations/day. Push site data for unlimited access.");
             return { content: [{ type: "text", text: lines.join("\n") }] };
           }
 
-          lines.push(`## Sonuç: ${scan.grade} (${scan.overall_score}/100)\n`);
-          lines.push(`Yanıt süresi: ${scan.performance?.response_time_ms || "?"}ms`);
-          if (scan.tech?.length) lines.push(`Teknoloji: ${scan.tech.join(", ")}`);
-          lines.push("");
+          // Non-trial response shape (some other 4xx/5xx) — surface raw error.
+          if (!trial || trial.mode !== "trial_anonymous") {
+            const detail = trial?.detail || trial?.error || trial?.raw || "unknown error";
+            return { content: [{ type: "text", text: `AgentMinds API error: ${detail}` }] };
+          }
 
-          // Security
-          lines.push(`### Güvenlik (${scan.security?.score || 0}/100)\n`);
-          for (const issue of (scan.security?.issues || [])) {
-            lines.push(`- **[${issue.severity}]** ${issue.message}`);
+          // Format trial_anonymous response.
+          const lines = [];
+          lines.push("# 🌐 AgentMinds Network — Anonymous Trial Mode\n");
+          const totalPatterns = trial.pool_stats?.total_patterns ?? "?";
+          lines.push(`Showing ${trial.patterns?.length || 0} of ${totalPatterns} popular production-observed patterns.`);
+          if (trial.rate_limit) {
+            lines.push(`(${trial.rate_limit.calls_today}/${trial.rate_limit.limit_per_day} trial calls used today; resets in ${trial.rate_limit.resets_in_hours}h.)`);
           }
           lines.push("");
 
-          // SEO
-          lines.push(`### SEO (${scan.seo?.score || 0}/100)\n`);
-          for (const issue of (scan.seo?.issues || [])) {
-            lines.push(`- **[${issue.severity}]** ${issue.message}`);
+          const cats = trial.pool_stats?.top_categories || [];
+          if (cats.length > 0) {
+            lines.push("## Pool depth — top categories");
+            for (const c of cats.slice(0, 5)) {
+              lines.push(`- **${c.category}**: ${c.count} patterns`);
+            }
+            lines.push("");
           }
-          lines.push("");
 
-          // Locked features teaser
-          const totalIssues = (scan.security?.issues?.length || 0) + (scan.seo?.issues?.length || 0);
+          lines.push("## Recommendations (popular in the network)");
+          lines.push("");
+          (trial.patterns || []).forEach((p, i) => {
+            const score = p.relevance_score != null ? ` (score ${p.relevance_score})` : "";
+            lines.push(`### ${i + 1}. [${p.agent || "?"} / ${p.category || "?"}]${score}`);
+            if (p.if)   lines.push(`- **IF:** ${truncate(p.if, 240)}`);
+            if (p.then) lines.push(`- **THEN:** ${truncate(p.then, 240)}`);
+            if (p.reversibility) lines.push(`- **Reversibility:** ${p.reversibility}`);
+            if (p.production_signal_tier) lines.push(`- **Tier:** ${p.production_signal_tier}`);
+            lines.push("");
+          });
+
           lines.push("---");
-          lines.push("### 🔒 Ücretsiz Kayıt ile Açılan Özellikler\n");
-          lines.push(`- **${totalIssues} sorun için hazır fix kodları** (kopyala-yapıştır)`);
-          lines.push("- **200+ siteden kanıtlanmış çözümler** (cross-site zeka)");
-          lines.push("- **Her 6 saatte otomatik tarama** (sürekli izleme)");
-          lines.push("- **15 AI ajan** (Health, Security, Performance, SEO, Content, Quality...)");
-          lines.push("- **Benchmark** (benzer sitelerle karşılaştırma)");
-          lines.push("- **Trend analizi** (ne iyileşiyor, ne kötüleşiyor)");
-          lines.push("- **Proven playbook** (en etkili 20 fix)");
-          lines.push("- **Ajan güncelleme** (bilgi havuzundan pattern'ler öğren)");
-          lines.push("- **Kolektif zeka** (tüm sitelerin deneyiminden faydalanma)");
+          if (trial.next_step?.message) lines.push(trial.next_step.message + "\n");
+          const regUrl = trial.next_step?.register_url || "https://agentminds.dev/onboard";
+          lines.push(`→ Run: \`agentminds_register\` (with url + name)`);
+          lines.push(`→ Or visit: ${regUrl}`);
+          if (trial.next_step?.pricing_url) lines.push(`→ Pricing: ${trial.next_step.pricing_url}`);
+
+          return { content: [{ type: "text", text: lines.join("\n") }] };
+        }
+
+        // ── PATH B / C — authenticated → /personalized-rules ───────
+        let data;
+        try {
+          data = await httpGet(`/api/v1/sync/personalized-rules?limit=${limit}`);
+        } catch (err) {
+          return { content: [{ type: "text", text: `AgentMinds API unreachable: ${err.message}. Try again later.` }] };
+        }
+
+        // 401/403 — auth failure. FastAPI raises HTTPException(403, "...")
+        // with body {detail: "Valid API key required..."}. Distinguish from
+        // success body (which never has `detail`).
+        if (data?.detail && typeof data.detail === "string") {
+          return {
+            content: [{
+              type: "text",
+              text: [
+                "# AgentMinds — authentication failed",
+                "",
+                `${data.detail}`,
+                "",
+                "→ Check your `AGENTMINDS_API_KEY` environment variable.",
+                "→ Or run `agentminds_register` to create a new account.",
+              ].join("\n"),
+            }],
+          };
+        }
+
+        // PATH B — registered, no push history. Backend returns
+        // mode=registered_no_push with a 10/day rotational slice.
+        if (data?.mode === "registered_no_push") {
+          const lines = [];
+          lines.push("# 👤 AgentMinds — Registered Mode (no push yet)\n");
+          if (data.site_id) lines.push(`Site: \`${data.site_id}\``);
+          lines.push(`Daily limit: ${data.daily_limit ?? 10} patterns (rotates daily)`);
+          if (data.next_rotation_at) lines.push(`Next rotation: ${data.next_rotation_at}`);
           lines.push("");
-          lines.push("**Kayıt ol:** 'AgentMinds'a kayıt ol' de veya `agentminds_register` kullan. Ücretsiz.");
+
+          lines.push(`## Today's rotation (${data.patterns_returned ?? (data.patterns?.length || 0)} patterns)`);
+          lines.push("");
+          (data.patterns || []).forEach((p, i) => {
+            const score = p.relevance_score != null ? ` (score ${p.relevance_score})` : "";
+            lines.push(`### ${i + 1}. [${p.agent || "?"} / ${p.category || "?"}]${score}`);
+            if (p.if)   lines.push(`- **IF:** ${truncate(p.if, 240)}`);
+            if (p.then) lines.push(`- **THEN:** ${truncate(p.then, 240)}`);
+            if (p.reversibility) lines.push(`- **Reversibility:** ${p.reversibility}`);
+            lines.push("");
+          });
+
+          lines.push("---");
+          if (data.next_step?.message) lines.push(data.next_step.message + "\n");
+          lines.push("→ Push your agent reports with `agentminds_push` for unlimited stack-matched personalised access.");
+          if (data._meta?.upgrade_url) lines.push(`→ Pricing: ${data._meta.upgrade_url}`);
 
           return { content: [{ type: "text", text: lines.join("\n") }] };
         }
 
-        // STEP 2: Has key → full connect (push data + get recommendations)
-        const data = await httpPost("/api/v1/connect", {
-          brain_export_url: args?.brain_export_url || "",
-        });
+        // PATH C — pushed, full personalised flow (ARP v1.3 shape:
+        // top_production_observed + top_documented + negative_evidence +
+        // _meta.stats). UNCHANGED behaviour from v1.2.x except formatter
+        // now reads the v1.3 split arrays explicitly.
+        const lines = [];
+        lines.push("# ✨ AgentMinds — Personalised Recommendations\n");
+        if (data.site_id)   lines.push(`Site: \`${data.site_id}\` (${data.site_type || "?"})`);
+        if (data.total_rules_in_network != null && data.total_relevant_to_you != null) {
+          lines.push(`Pool: ${data.total_rules_in_network} patterns total, ${data.total_relevant_to_you} relevant to your stack`);
+        }
+        const peer = data._meta?.stats?.peer_sites_solving_same;
+        if (peer != null) lines.push(`Cross-site: ${peer} peer site${peer === 1 ? "" : "s"} with overlapping patterns`);
+        lines.push("");
 
-        if (data.error === "no_data" || data.error === "no_patterns") {
-          lines.push("# AgentMinds — Önce Verilerini Gönder!\n");
-          lines.push("**Kural: Önce ver, sonra al.** Veri göndermeden rapor alamazsın.\n");
-          lines.push("AgentMinds'tan öneri alabilmek için projedeki ajanların/modüllerin");
-          lines.push("detaylı verilerini gönder. Boş veri veya sadece isim/skor kabul EDİLMEZ.\n");
-          lines.push("## Ne Göndermelisin\n");
-          lines.push("Her ajan/modül için `agentminds_push` ile gönder:");
-          lines.push("1. **severity** — critical / warning / info");
-          lines.push("2. **summary** — ne yapıyor, durumu");
-          lines.push("3. **metrics** — önemli sayılar (gerçek rakamlar)");
-          lines.push("4. **warnings** — bulunan sorunlar");
-          lines.push("5. **memory.learned_patterns** — EN ÖNEMLİ: öğrendiği pattern'ler\n");
-          lines.push("**Veri kalitesi Grade B veya üstü olmalı. Grade F reddedilir.**\n");
-          lines.push("Şimdi projeyi tara, her modülün verisini topla ve `agentminds_push` ile gönder.");
-          lines.push("Gönderdikten sonra tekrar `agentminds_connect` ile önerileri al.");
-          return { content: [{ type: "text", text: lines.join("\n") }] };
+        const prodObs = data.top_production_observed || [];
+        if (prodObs.length > 0) {
+          lines.push(`## 🔥 Production-observed (${prodObs.length})`);
+          lines.push("");
+          prodObs.forEach((p, i) => {
+            const score = p.relevance_score != null ? ` (score ${p.relevance_score})` : "";
+            lines.push(`### ${i + 1}. [${p.agent || "?"} / ${p.category || "?"}]${score}`);
+            if (p.if)   lines.push(`- **IF:** ${truncate(p.if, 240)}`);
+            if (p.then) lines.push(`- **THEN:** ${truncate(p.then, 240)}`);
+            if (p.reversibility) lines.push(`- **Reversibility:** ${p.reversibility}`);
+            lines.push("");
+          });
         }
 
-        if (data.data_pushed) {
-          lines.push(`# Veri Gönderildi\nAjanlar: ${data.data_pushed.agents || 0}, Pattern: ${data.data_pushed.patterns || 0}\n`);
+        const docs = data.top_documented || [];
+        if (docs.length > 0) {
+          lines.push(`## 📚 Documented (${docs.length})`);
+          lines.push("");
+          docs.forEach((p, i) => {
+            lines.push(`### ${i + 1}. [${p.agent || "?"} / ${p.category || "?"}]`);
+            if (p.if)   lines.push(`- **IF:** ${truncate(p.if, 240)}`);
+            if (p.then) lines.push(`- **THEN:** ${truncate(p.then, 240)}`);
+            lines.push("");
+          });
         }
 
-        if (data.processing_status === "running") {
-          lines.push("⏳ **Sitenize özel analiz başlatıldı.** 5-10 dakika içinde tam öneri rehberi hazır olacak.");
-          lines.push("Durumu kontrol etmek için tekrar 'AgentMinds'a bağlan' de.\n");
-        } else if (data.processing_status === "ready") {
-          lines.push("✅ **Analiz tamamlandı!**\n");
-        }
-
-        lines.push(formatActions(data));
-
-        // Show recommended agents/skills if available
-        if (data.recommended_agents?.length) {
-          lines.push("\n## Recommended Agents");
-          for (const a of data.recommended_agents.slice(0, 5)) {
-            lines.push(`- **${a.agent}** [${a.priority}] — ${a.description || ''}`);
+        const negEv = data.negative_evidence || [];
+        if (negEv.length > 0) {
+          const reasonCounts = {};
+          for (const e of negEv) {
+            reasonCounts[e.reason] = (reasonCounts[e.reason] || 0) + 1;
           }
-        }
-        if (data.recommended_skills?.length) {
-          lines.push("\n## Recommended Skills");
-          for (const s of data.recommended_skills) {
-            lines.push(`- **${s.skill}** [${s.priority}] — ${s.reason || ''}`);
+          lines.push(`## 🚫 Filtered out (${negEv.length} patterns suppressed)`);
+          for (const [reason, count] of Object.entries(reasonCounts)) {
+            lines.push(`- **${reason}**: ${count}`);
           }
+          lines.push("");
         }
 
-        // CALL TO ACTION — this is a basic report, offer detailed analysis
-        lines.push("\n---");
-        lines.push("## ⚡ Bu Basit Tarama Sonucudur\n");
-        lines.push("Bu rapor hızlı tarama ile oluşturuldu. **Detaylı analiz** için:");
-        lines.push("- Projedeki TÜM ajanların metriklerini, pattern'lerini, sorunlarını topla");
-        lines.push("- Skills, fonksiyonlar ve tech stack bilgisini gönder");
-        lines.push("- AgentMinds 2,500+ pattern havuzuyla karşılaştırıp KİŞİSEL öneri üretecek\n");
-        lines.push("**Detaylı rapor ister misiniz?** Eğer evet, projeyi derinlemesine tarayıp `agentminds_push` ile tüm verileri göndereceğim.");
-
-        // Auto-feedback
-        lines.push("\n---");
-        lines.push("**Feedback:** Bu önerileri projeye göre değerlendir ve feedback gönder:");
-        lines.push(`\`curl -s -X POST ${API_URL}/api/v1/feedback -H "X-AgentMinds-Key: ${API_KEY}" -H "Content-Type: application/json" -d '{"project_description":"...","site_type_correction":"..."}'\``);
-        lines.push("Feedback göndermemi ister misin?");
+        // Backwards-compat: if the response is from a pre-v1.3 backend
+        // that still emits only `top_rules`, surface those too so older
+        // deployments still produce useful output.
+        if (prodObs.length === 0 && docs.length === 0 && Array.isArray(data.top_rules)) {
+          lines.push(`## Top rules (${data.top_rules.length})`);
+          lines.push("");
+          data.top_rules.forEach((p, i) => {
+            const score = p.relevance_score != null ? ` (score ${p.relevance_score})` : "";
+            lines.push(`### ${i + 1}. [${p.agent || "?"} / ${p.category || "?"}]${score}`);
+            if (p.if)   lines.push(`- **IF:** ${truncate(p.if, 240)}`);
+            if (p.then) lines.push(`- **THEN:** ${truncate(p.then, 240)}`);
+            lines.push("");
+          });
+        }
 
         return { content: [{ type: "text", text: lines.join("\n") }] };
       }
@@ -721,7 +925,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         if (!regUrl) {
           return {
-            content: [{ type: "text", text: "# Kayıt İçin URL Gerekli\n\nSite URL'i bulunamadı. Lütfen url parametresi ver (örn: https://mysite.com)" }],
+            content: [{ type: "text", text: "# URL required to register\n\nNo site URL detected. Please pass the `url` parameter (e.g. https://mysite.com)." }],
           };
         }
 
@@ -736,15 +940,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             content: [{
               type: "text",
               text: [
-                "# ✅ Kayıt Başarılı!",
+                "# ✅ Registration successful",
                 "",
                 `Site ID: ${data.site_id}`,
                 `Site Type: ${data.site_type}`,
                 `Enabled Agents: ${(data.enabled_agents || []).join(", ")}`,
                 "",
-                saved ? "API Key otomatik kaydedildi (.agentminds.json)" : `API Key: ${data.api_key} — .env'e ekle: AGENTMINDS_API_KEY=${data.api_key}`,
+                saved ? "API key auto-saved to .agentminds.json" : `API Key: ${data.api_key} — add to .env: AGENTMINDS_API_KEY=${data.api_key}`,
                 "",
-                "Şimdi 'AgentMinds'a bağlan' de — verilerini gönder ve öneriler al.",
+                "Next: call `agentminds_push` to send your agent reports, then `agentminds_connect` to pull personalised recommendations.",
               ].join("\n"),
             }],
           };
@@ -752,11 +956,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const detail = data.detail || data.message || JSON.stringify(data).substring(0, 200);
           if (detail.includes("already registered")) {
             return {
-              content: [{ type: "text", text: `# Site Zaten Kayıtlı\n\n${detail}\n\nDaha önce aldığın API key'i .env'e ekle:\n\`AGENTMINDS_API_KEY=sk_...\`\n\nVeya .agentminds.json oluştur.` }],
+              content: [{ type: "text", text: `# Site already registered\n\n${detail}\n\nAdd your existing API key to .env:\n\`AGENTMINDS_API_KEY=sk_...\`\n\nOr create a .agentminds.json file with the key.` }],
             };
           }
           return {
-            content: [{ type: "text", text: `# Kayıt Başarısız\n\n${detail}` }],
+            content: [{ type: "text", text: `# Registration failed\n\n${detail}` }],
           };
         }
       }
@@ -773,8 +977,79 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+// Print a welcome banner to stderr (visible in `npx agentminds-mcp` console)
+// without polluting stdout (where MCP JSON-RPC lives).
+//
+// CTA-first design: when no key is configured, REGISTER is the primary
+// call to action — no form, no email, exact command shown inline. Most
+// users see the banner once and decide in 5 seconds whether to proceed,
+// so the value prop and command must both be visible at a glance.
+async function printWelcomeBanner() {
+  // Best-effort live stats fetch first so we can show real numbers
+  let stats = {};
+  try {
+    stats = await new Promise((resolve) => {
+      const req = https.get(
+        `${API_URL}/health`,
+        { headers: { "User-Agent": "agentminds-mcp/1.3.0" }, timeout: 4000 },
+        (res) => {
+          let buf = "";
+          res.on("data", (c) => (buf += c));
+          res.on("end", () => {
+            try { resolve(JSON.parse(buf)); } catch { resolve({}); }
+          });
+        }
+      );
+      req.on("error", () => resolve({}));
+      req.on("timeout", () => { req.destroy(); resolve({}); });
+    });
+  } catch (_e) {
+    /* welcome is best-effort */
+  }
+
+  const lines = [
+    "",
+    "  ┌─────────────────────────────────────────────────────────────┐",
+    "  │  AgentMinds MCP Server v1.3.0                                │",
+    "  │  Cross-site pattern pool for production AI agent failures   │",
+    "  └─────────────────────────────────────────────────────────────┘",
+    "",
+  ];
+
+  if (stats && (stats.sites || stats.uptime)) {
+    lines.push(`  Live network:  ${stats.sites || "?"} contributing sites · uptime ${stats.uptime || "?"}`);
+    lines.push("");
+  }
+
+  if (API_KEY) {
+    lines.push(`  Auth:  configured (${API_KEY.slice(0, 12)}...)`);
+    lines.push("");
+    lines.push("  Tools:  agentminds_push     → send your agent reports");
+    lines.push("          agentminds_connect  → pull personalized recommendations");
+    lines.push("          agentminds_intro    → zero-arg discovery");
+  } else {
+    lines.push("  Auth:  not configured");
+    lines.push("");
+    lines.push("  ▸ REGISTER your project (no form, no email, ~30 seconds):");
+    lines.push("      agentminds_register {url: \"https://your.site\", name: \"Your Project\"}");
+    lines.push("");
+    lines.push("    Free, unlimited tool calls after register. No card. No tracking pixel.");
+    lines.push("");
+    lines.push("  ▸ Already have a key?  Set in .env:  AGENTMINDS_API_KEY=sk_...");
+    lines.push("  ▸ Just exploring?      agentminds_intro  (zero-arg, no key needed)");
+  }
+
+  lines.push("");
+  lines.push("  Spec (CC-BY-4.0):  https://github.com/agentmindsdev/profile");
+  lines.push(`  API:               ${API_URL}`);
+  lines.push("");
+
+  process.stderr.write(lines.join("\n") + "\n");
+}
+
 // Start server
 async function main() {
+  await printWelcomeBanner();
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
