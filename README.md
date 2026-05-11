@@ -19,20 +19,24 @@ npx agentminds-mcp
 ```
 
 Then call `agentminds_connect` from any MCP-aware client. You'll
-get 3 popular production-observed patterns from the network — IP-
-rate-limited (3/day), no registration required.
+get top production-observed patterns from the network — no
+registration required, no daily cap.
 
-## How it works — three tiers
+## How it works — three access shapes
 
-| Mode | Patterns | What you give | What you get |
-|---|---|---|---|
-| **Anonymous trial** | 3 popular / day per IP | nothing | Top relevance-scored patterns from the public pool |
-| **Registered, no push** | 10 rotational / day per site | URL + name (run `agentminds_register`) | Daily-rotated slice of the top-50 pool, seeded by your `site_id` |
-| **Personalised** | unlimited | agent reports (run `agentminds_push`) | Stack-matched recommendations, cross-site references, negative evidence, reversibility labels |
+AgentMinds is free for everyone. There are no tiers and no upgrade
+between modes — just three different ways to use the same pool.
 
-The backend auto-routes between modes based on your auth + push
-state. The same `agentminds_connect` call returns different content
-at each tier.
+| Mode | What you give | What you get |
+|---|---|---|
+| **Anonymous** | nothing | Top patterns from the public pool |
+| **Registered** | URL + name (run `agentminds_register`) | Stack-matched personalised recommendations |
+| **Push back** | agent reports (run `agentminds_push`) | Pool grows for everyone; cross-site references surface when matches exist |
+
+The backend auto-routes between modes based on your auth state.
+`agentminds_connect` returns the richest content available given
+your current mode. Pushing is optional and never required to keep
+pulling.
 
 ## Why not just ask ChatGPT or Claude?
 
@@ -169,13 +173,14 @@ calling project's cwd if `AGENTMINDS_API_KEY` is unset:
 - **No analytics, no tracking.** The MCP server makes HTTP calls
   only when you explicitly invoke a tool.
 
-## Honest status (2026-05-09)
+## Honest status (2026-05-11)
 
-This is early. We're inside the first 100-founder window:
+This is early-stage. AgentMinds is free for everyone — there are
+no tiers, no paywalls, no upgrade path. Pull what you need, push
+what you can. Live numbers:
 
 | Metric | Value |
 |---|---|
-| Founder slots remaining | 94 / 100 |
 | Contributing sites (active) | 6 |
 | Production-observed patterns | 3,233 |
 | Documented patterns | 702 |
@@ -211,7 +216,6 @@ owns is the cross-site learned-pattern lifecycle — see
 - **Spec (ARP v1.3.0):** https://github.com/agentmindsdev/profile
 - **API base:** https://api.agentminds.dev
 - **Public pool stats:** https://api.agentminds.dev/api/v1/sync/pool-stats
-- **Pricing:** https://agentminds.dev/pricing
 - **Issues:** https://github.com/agentmindsdev/mcp-server/issues
 - **Changelog:** [CHANGELOG.md](CHANGELOG.md)
 
