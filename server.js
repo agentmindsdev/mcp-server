@@ -177,10 +177,14 @@ async function autoRegisterIfNeeded() {
 }
 
 // ══════════════════════════════════════════════════════════════
-// Rate limiting — daily request limit per key
+// Rate limiting — gift-economy mode (v1.4.0, 2026-05-12).
+// AgentMinds is free for everyone. The previous 1-request/day
+// trial cap was a paid-tier funnel; with no tiers there's no
+// reason to throttle. Functions kept (still called from the
+// dispatcher) but always allow + report "unlimited".
 // ══════════════════════════════════════════════════════════════
 
-const FREE_DAILY_LIMIT = 1; // No key: 1 request/day (trial)
+const FREE_DAILY_LIMIT = Number.POSITIVE_INFINITY;
 const rateLimitFile = path.join(process.cwd(), ".agentminds_usage.json");
 
 function getRateLimit() {
@@ -202,18 +206,10 @@ function incrementRateLimit() {
 }
 
 function checkRateLimit() {
-  // Has key → unlimited
-  if (API_KEY) {
-    return { allowed: true, remaining: "unlimited" };
-  }
-
-  // No key → 1 request/day trial
-  const data = getRateLimit();
-  if (data.count >= FREE_DAILY_LIMIT) {
-    return { allowed: false, reason: "Free trial limit reached (1/day). Register for unlimited access: POST https://api.agentminds.dev/api/v1/sync/onboard" };
-  }
-
-  return { allowed: true, remaining: FREE_DAILY_LIMIT - data.count };
+  // Always allow. Counter stays for local-usage curiosity but
+  // never blocks. Keeping the function so the dispatcher does
+  // not need to change shape.
+  return { allowed: true, remaining: "unlimited" };
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -223,7 +219,7 @@ function checkRateLimit() {
 // User-Agent identifies MCP traffic in Render server access logs so we
 // can measure "downloads → real API calls → registers" funnel without
 // adding a separate telemetry endpoint.
-const MCP_UA = "agentminds-mcp/1.3.3";
+const MCP_UA = "agentminds-mcp/1.4.0";
 
 function httpGet(path) {
   return new Promise((resolve, reject) => {
@@ -279,6 +275,24 @@ function httpPost(path, body) {
 // Format helpers
 // ══════════════════════════════════════════════════════════════
 
+// Universal feedback prompt appended to every "success" tool output.
+// The single most useful signal for the project — calls to action
+// asking the user (or the AI parsing the result) to submit a verdict.
+// Defined once here so the wording stays consistent everywhere.
+const FEEDBACK_FOOTER = [
+  "",
+  "---",
+  "💬 **Was this useful?** Call `agentminds_feedback` with",
+  "`usefulness: yes | no | sort_of` (optional `note`). All three",
+  "verdicts help equally — this is the only direct measure of",
+  "whether AgentMinds is solving a real problem.",
+].join("\n");
+
+function appendFeedback(lines) {
+  lines.push(FEEDBACK_FOOTER);
+  return lines;
+}
+
 function truncate(s, n) {
   if (typeof s !== "string") return "";
   if (s.length <= n) return s;
@@ -333,7 +347,7 @@ function formatActions(data) {
 // ══════════════════════════════════════════════════════════════
 
 const server = new Server(
-  { name: "agentminds", version: "1.3.3" },
+  { name: "agentminds", version: "1.4.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -359,38 +373,35 @@ When to call: first interaction, new agent session, when context is unclear.`,
       name: "agentminds_connect",
       description: `Get AI agent improvement recommendations from the AgentMinds network.
 
-WORKS WITHOUT REGISTRATION. Three modes based on auth + push state:
+WORKS WITHOUT REGISTRATION. Gift-economy mode (v1.4.0):
+AgentMinds is free for everyone. No daily caps, no tiers, no
+push-to-unlock gates. Two access shapes:
 
 1. ANONYMOUS (no API key in env):
-   Returns 3 popular production-observed patterns from the network.
-   Rate limited to 3 calls/day per IP at the backend.
-   Includes pool stats + register CTA.
+   Returns top production-observed patterns from the network.
+   Default 100 patterns; pass limit=all for the entire public
+   projection of the pool.
 
-2. REGISTERED (API key set, no push history):
-   Returns up to 10 personalized recommendations/day, daily rotation.
-   Selected from the top-50 pool, rotated deterministically per site_id.
-   Includes push CTA for unlimited access.
-
-3. PUSHED (API key + previous agentminds_push call):
-   Returns unlimited stack-matched personalized recommendations.
-   Includes cross-site references, negative evidence, reversibility
-   labels, full ARP v1.3 response shape.
+2. REGISTERED (API key set):
+   Returns stack-matched personalised recommendations including
+   cross-site references, negative evidence, reversibility labels.
+   Full ARP v1.3 response shape. Push agent reports voluntarily
+   to grow the pool — pushing is optional and never required.
 
 CRITICAL ANTI-HALLUCINATION RULES (preserved from v1.2.x):
 1. NEVER fabricate recommendations.
 2. ALWAYS use the tool's actual response — do not invent patterns.
 3. If the API is unreachable, output "API unreachable" — do not improvise.
-4. The trial-mode response is REAL data from the pool — show it as-is.
+4. Both modes return REAL data from the pool — show it as-is.
 5. Distinguish in your output:
-   - trial_anonymous mode  = "popular in the network"
-   - registered_no_push mode = "rotational selection, 10/day"
-   - personalized mode     = "matched to your stack"`,
+   - trial_anonymous mode = "popular in the network"
+   - personalised mode    = "matched to your stack"`,
       inputSchema: {
         type: "object",
         properties: {
           limit: {
             type: "number",
-            description: "Max patterns to return (default 10, capped at 20). Anonymous mode always returns 3 regardless.",
+            description: "Max patterns to return (default 30, capped at 100 client-side).",
           },
           site_url: {
             type: "string",
@@ -407,9 +418,11 @@ CRITICAL ANTI-HALLUCINATION RULES (preserved from v1.2.x):
       name: "agentminds_push",
       description: `Push your agent reports to the AgentMinds network.
 
-Once you push, your account unlocks "personalised" mode — agentminds_connect
-will return stack-matched recommendations + cross-site references + negative
-evidence, instead of the generic 10-pattern rotational pool.
+Pushing is voluntary and never required to keep pulling patterns
+— it's how the pool grows for everyone, including you. After at
+least one push, agentminds_connect personalised recommendations
+include cross-site references (where peer sites with overlapping
+stacks have observed the same pattern).
 
 Required minimum: at least one report with agent + severity + summary.
 The more signal you include (metrics, warnings, learned_patterns), the higher
@@ -535,6 +548,42 @@ NEVER claim success without backend confirmation.`,
         required: ["url", "name"],
       },
     },
+    {
+      name: "agentminds_feedback",
+      description:
+        "Submit a quick 'was AgentMinds useful?' verdict. Call this when " +
+        "the user expresses an opinion about the output of a prior tool " +
+        "call — phrases like 'yes that helped', 'no this is wrong', " +
+        "'kind of useful', 'sort of', or any thumbs up / down sentiment. " +
+        "Also call when the user explicitly says 'agentminds-feedback' / " +
+        "'feedback yes' / 'feedback no'. This is the single most valuable " +
+        "signal for the project — yes/no/sort-of all help equally.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          usefulness: {
+            type: "string",
+            enum: ["yes", "no", "sort_of"],
+            description:
+              "Verdict: 'yes' = solved a real problem, 'no' = wasn't " +
+              "useful, 'sort_of' = partial / mixed value.",
+          },
+          context: {
+            type: "string",
+            description:
+              "Which tool the verdict refers to (e.g. 'connect', " +
+              "'push', 'intro'). Optional — defaults to 'unspecified'.",
+          },
+          note: {
+            type: "string",
+            description:
+              "Optional free-text note. What worked, what didn't, " +
+              "what was missing. Up to 500 chars.",
+          },
+        },
+        required: ["usefulness"],
+      },
+    },
   ],
 }));
 
@@ -547,6 +596,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // gating it behind rate limit broke first-time discovery for new users.
   const FREE_TOOLS = new Set([
     "agentminds_intro", "agentminds_status", "agentminds_register",
+    "agentminds_feedback",
   ]);
 
   // v1.3.1 (2026-05-09): implicit auto-registration on tool call
@@ -657,20 +707,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           "- Never fabricate AgentMinds recommendations. If the API fails, say 'API unreachable' and stop.",
           "- Never claim 'AgentMinds recommends X' unless you got real data from agentminds_connect or agentminds_actions.",
           "- The moat is privacy: peer site identities are NEVER returned, only counts.",
+          "",
+          "## Quick feedback (the single most useful signal)",
+          "After you (or the user) try a tool, call `agentminds_feedback`",
+          "with usefulness=yes / no / sort_of (and an optional note).",
+          "This is the only direct measure of whether the project is",
+          "solving real problems. All three verdicts help equally.",
         ].join("\n");
         return { content: [{ type: "text", text: intro }] };
       }
 
       case "agentminds_connect": {
-        // Tier-aware pull-first model (mcp v1.3.3, backend a8c23b3):
-        //   PATH A — no API key      → /api/v1/sync/trial-rules (anon, 3/day)
-        //   PATH B — key, no push    → /api/v1/sync/personalized-rules (10/day rotational)
-        //   PATH C — key + push      → /api/v1/sync/personalized-rules (full personalised v1.3)
+        // Gift-economy mode (mcp v1.4.0, 2026-05-11):
+        //   PATH A — no API key   → /api/v1/sync/trial-rules (anon, unlimited)
+        //   PATH B — key present  → /api/v1/sync/personalized-rules (full personalised)
         //
-        // Backend auto-branches B vs C based on the site's last_report_at.
-        // The MCP only needs to detect A vs (B|C) by API_KEY presence; the
-        // returned payload's `mode` field tells us which formatter to use.
-        const limit = Math.min(Math.max(parseInt(args?.limit, 10) || 10, 1), 20);
+        // PATH B used to branch into "registered_no_push" rotational on
+        // a 10/day cap; that gate was removed backend-side, every authed
+        // caller now goes straight to full personalised regardless of
+        // push history. The dead registered_no_push formatter is kept
+        // below as defensive fallback in case the backend ever emits
+        // that mode again.
+        const limit = Math.min(Math.max(parseInt(args?.limit, 10) || 30, 1), 100);
 
         // ── PATH A — anonymous trial ───────────────────────────────
         if (!API_KEY) {
@@ -735,8 +793,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const regUrl = trial.next_step?.register_url || "https://agentminds.dev/onboard";
           lines.push(`→ Run: \`agentminds_register\` (with url + name)`);
           lines.push(`→ Or visit: ${regUrl}`);
-          if (trial.next_step?.pricing_url) lines.push(`→ Pricing: ${trial.next_step.pricing_url}`);
 
+          appendFeedback(lines);
           return { content: [{ type: "text", text: lines.join("\n") }] };
         }
 
@@ -806,10 +864,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           lines.push("- Run `agentminds_push` with `reports: [{...}]`");
           lines.push("- See the tool description for the envelope schema");
           lines.push("- Or visit https://agentminds.dev/docs for full guide");
-          if (data._meta?.upgrade_url) {
-            lines.push(`- Pricing: ${data._meta.upgrade_url}`);
-          }
 
+          appendFeedback(lines);
           return { content: [{ type: "text", text: lines.join("\n") }] };
         }
 
@@ -881,6 +937,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           });
         }
 
+        appendFeedback(lines);
         return { content: [{ type: "text", text: lines.join("\n") }] };
       }
 
@@ -904,7 +961,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 "   `.agentminds.json`, then call this tool again.",
                 "",
                 "**Or browse without registering:** run `agentminds_connect`",
-                "for the anonymous trial (3 popular network patterns, no signup).",
+                "for the anonymous trial (top network patterns, no signup).",
               ].join("\n"),
             }],
           };
@@ -1239,6 +1296,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
+      case "agentminds_feedback": {
+        // Quick "was this useful?" signal — the single most valuable
+        // datapoint for the project. v1.4.0 / 2026-05-12.
+        const verdict = String(args.usefulness || "").toLowerCase().trim();
+        if (!["yes", "no", "sort_of"].includes(verdict)) {
+          return {
+            content: [{ type: "text", text:
+              "agentminds_feedback requires usefulness: 'yes', 'no', " +
+              "or 'sort_of'. All three help equally — even 'no' is " +
+              "valuable signal."
+            }],
+            isError: true,
+          };
+        }
+        const context = String(args.context || "unspecified").slice(0, 64);
+        const note = String(args.note || "").slice(0, 500);
+        const data = await httpPost("/api/v1/sync/quick-feedback", {
+          usefulness: verdict,
+          context,
+          note,
+          session_id: process.env.AGENTMINDS_SESSION_ID || "",
+        });
+        const verdictWord = verdict === "sort_of" ? "sort-of" : verdict;
+        const lines = [
+          `# Feedback recorded: ${verdictWord}`,
+          "",
+          data && data.thanks ? data.thanks : (
+            "Thanks. Yes/no/sort-of all help equally — the project " +
+            "uses this to decide whether AgentMinds is solving a " +
+            "real problem or not."
+          ),
+        ];
+        if (note) {
+          lines.push("");
+          lines.push(`Your note: "${note}"`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
       default:
         return { content: [{ type: "text", text: `Unknown tool: ${name}` }] };
     }
@@ -1265,7 +1361,7 @@ async function printWelcomeBanner() {
     stats = await new Promise((resolve) => {
       const req = https.get(
         `${API_URL}/health`,
-        { headers: { "User-Agent": "agentminds-mcp/1.3.3" }, timeout: 4000 },
+        { headers: { "User-Agent": "agentminds-mcp/1.4.0" }, timeout: 4000 },
         (res) => {
           let buf = "";
           res.on("data", (c) => (buf += c));
@@ -1284,8 +1380,8 @@ async function printWelcomeBanner() {
   const lines = [
     "",
     "  ┌─────────────────────────────────────────────────────────────┐",
-    "  │  AgentMinds MCP Server v1.3.3                                │",
-    "  │  Cross-site pattern pool for production AI agent failures   │",
+    "  │  AgentMinds MCP Server v1.4.0                                │",
+    "  │  Free for everyone. Open pool. Pull what you need.          │",
     "  └─────────────────────────────────────────────────────────────┘",
     "",
   ];
@@ -1298,16 +1394,20 @@ async function printWelcomeBanner() {
   if (API_KEY) {
     lines.push(`  Auth:  configured (${API_KEY.slice(0, 12)}...)`);
     lines.push("");
-    lines.push("  Tools:  agentminds_push     → send your agent reports");
-    lines.push("          agentminds_connect  → pull personalized recommendations");
-    lines.push("          agentminds_intro    → zero-arg discovery");
+    lines.push("  Tools:  agentminds_push      → contribute back (voluntary)");
+    lines.push("          agentminds_connect   → pull personalised recommendations");
+    lines.push("          agentminds_feedback  → 'was this useful?' verdict");
+    lines.push("          agentminds_intro     → zero-arg discovery");
   } else {
-    lines.push("  Auth:  not configured");
+    lines.push("  Auth:  not configured  (anonymous mode is fine — unlimited)");
     lines.push("");
-    lines.push("  ▸ REGISTER your project (no form, no email, ~30 seconds):");
+    lines.push("  ▸ Pull immediately, no signup:");
+    lines.push("      agentminds_connect  (returns top patterns from the pool)");
+    lines.push("");
+    lines.push("  ▸ Want stack-matched personalised recommendations?");
     lines.push("      agentminds_register {url: \"https://your.site\", name: \"Your Project\"}");
     lines.push("");
-    lines.push("    Free, unlimited tool calls after register. No card. No tracking pixel.");
+    lines.push("    Free. No card. No upgrade prompts. Pushing back is optional.");
     lines.push("");
     lines.push("  ▸ Already have a key?  Set in .env:  AGENTMINDS_API_KEY=sk_...");
     lines.push("  ▸ Just exploring?      agentminds_intro  (zero-arg, no key needed)");

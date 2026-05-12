@@ -9,6 +9,70 @@ https://github.com/agentmindsdev/agentminds/blob/main/CHANGELOG.md
 
 ---
 
+## [1.4.0] — 2026-05-12
+
+Gift-economy release. AgentMinds is now free for everyone with
+no tiers, no daily caps, no upgrade gates. The push-to-unlock
+gate was disabled backend-side; this release brings the MCP
+client in line and adds a direct "was this useful?" feedback
+channel — the single most useful signal for the project.
+
+### Added
+
+- **`agentminds_feedback` tool.** New no-auth tool that submits a
+  quick verdict (`yes` / `no` / `sort_of`) on the most recent
+  tool output, with an optional free-text note. Persists to the
+  backend `telemetry_events` table via `POST /api/v1/sync/quick-
+  feedback`. Surfaces in `/admin/metrics` as a yes/no/sort-of
+  breakdown plus the last 10 free-text notes verbatim. Every
+  successful `agentminds_intro` / `agentminds_connect` output
+  now ends with a footer prompting the verdict.
+
+### Changed
+
+- **Welcome banner.** v1.3.3 -> v1.4.0; tagline changed from
+  "Cross-site pattern pool for production AI agent failures" to
+  "Free for everyone. Open pool. Pull what you need." Unauth
+  banner reorders so the anonymous-pull path is offered first
+  (it works without registration) and the register CTA is the
+  next-step option.
+- **Local rate limit removed.** The 1-request/day local trial
+  cap was a paid-tier funnel artifact; with no tiers there's no
+  reason to throttle. `checkRateLimit()` now always returns
+  `allowed: true` with `remaining: "unlimited"`.
+- **`agentminds_connect` defaults.** `limit` default raised from
+  10 to 30; client cap raised from 20 to 100. Backend supports
+  `?limit=all` for full-pool dump — exposed through the same
+  parameter when callers pass a large value.
+- **`agentminds_connect` description.** Rewritten from the old
+  "three tiers" framing to the new two access shapes (Anonymous
+  / Registered). Removed all rotational / 10-per-day / push-to-
+  unlock copy.
+- **`agentminds_push` description.** "Push to unlock" framing
+  retired; pushing is now described as voluntary contribution
+  back to the pool. Cross-site references still surface when
+  matches exist, but they are not gated behind push.
+
+### Removed
+
+- `pricing_url` reference from trial-success output (the field
+  was removed backend-side; this strips the dead reference).
+- `_meta.upgrade_url` reference from the (now-defensive) no-push
+  branch (was always wrong post-gift-economy).
+- "Why push?" rotational tier-comparison table from the no-push
+  formatter (kept the formatter itself as defensive fallback
+  for backend-emitting-unexpected-modes, but the copy that
+  framed push as an upgrade is gone).
+
+### Backwards compatibility
+
+- All v1.3.x callers keep working — every change is either a
+  pure addition (new tool, new footer, new default value) or a
+  removal of dead code paths the backend no longer triggers.
+  No tool was renamed, no schema field was removed.
+
+---
+
 ## [1.3.3] — 2026-05-09
 
 UX polish release closing the four P1 friction points the
